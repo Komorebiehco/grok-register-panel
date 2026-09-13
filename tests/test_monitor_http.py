@@ -195,7 +195,12 @@ def test_proxy_api_auth_mutations_and_redaction():
         base = f"http://127.0.0.1:{server.server_port}"
         try:
             payload = json.dumps(
-                {"proxies": f"proxy.example:8080:worker:{secret}"}
+                {
+                    "proxies": (
+                        f"proxy.example:8080:worker:{secret}\n"
+                        "unhealthy.example:8081"
+                    )
+                }
             ).encode("utf-8")
             status, _, _ = request(
                 base + "/api/proxies/import",
@@ -212,14 +217,48 @@ def test_proxy_api_auth_mutations_and_redaction():
             )
             assert status == 200
             imported = json.loads(body)
-            assert imported["imported_count"] == 1
+            assert imported["imported_count"] == 2
             assert secret not in body.decode("utf-8")
-            proxy_id = imported["items"][0]["id"]
+            proxy_id = next(
+                item["id"]
+                for item in imported["items"]
+                if item["host"] == "proxy.example"
+            )
+            unhealthy_id = next(
+                item["id"]
+                for item in imported["items"]
+                if item["host"] == "unhealthy.example"
+            )
+            proxy_store._apply_probe_result(
+                unhealthy_id,
+                {
+                    "ok": False,
+                    "error": "connection refused",
+                    "checked_at": "2026-09-13T00:00:00Z",
+                },
+            )
 
             status, _, body = request(base + "/api/proxies", token=token)
             assert status == 200
             assert secret not in body.decode("utf-8")
-            assert json.loads(body)["items"][0]["has_auth"] is True
+            assert any(item["has_auth"] for item in json.loads(body)["items"])
+
+            status, _, _ = request(
+                base + "/api/proxies/delete-unhealthy",
+                method="POST",
+                body=b"{}",
+            )
+            assert status == 401
+            status, _, body = request(
+                base + "/api/proxies/delete-unhealthy",
+                token=token,
+                method="POST",
+                body=b"{}",
+            )
+            assert status == 200
+            bulk_deleted = json.loads(body)
+            assert bulk_deleted["deleted_count"] == 1
+            assert bulk_deleted["summary"]["total"] == 1
 
             status, _, body = request(
                 base + f"/api/proxies/{proxy_id}",

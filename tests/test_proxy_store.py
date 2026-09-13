@@ -238,6 +238,98 @@ def test_disable_delete_and_legacy_import():
         assert deleted["summary"]["total"] == 1
 
 
+def test_delete_unhealthy_only_and_skip_testing_items():
+    with IsolatedStore():
+        imported = proxy_store.import_proxies(
+            "\n".join(
+                [
+                    "http://unhealthy.example:8000",
+                    "http://testing.example:8001",
+                    "http://healthy.example:8002",
+                    "http://cooldown.example:8003",
+                    "http://unknown.example:8004",
+                ]
+            )
+        )
+        unhealthy_id = next(
+            item["id"]
+            for item in imported["items"]
+            if item["host"] == "unhealthy.example"
+        )
+        testing_id = next(
+            item["id"]
+            for item in imported["items"]
+            if item["host"] == "testing.example"
+        )
+        healthy_id = next(
+            item["id"]
+            for item in imported["items"]
+            if item["host"] == "healthy.example"
+        )
+        cooldown_id = next(
+            item["id"]
+            for item in imported["items"]
+            if item["host"] == "cooldown.example"
+        )
+
+        proxy_store._apply_probe_result(
+            unhealthy_id,
+            {"ok": False, "error": "connection refused", "checked_at": "2026-09-13T00:00:00Z"},
+        )
+        proxy_store._apply_probe_result(
+            testing_id,
+            {"ok": False, "error": "connection refused", "checked_at": "2026-09-13T00:00:00Z"},
+        )
+        proxy_store._apply_probe_result(
+            healthy_id,
+            {
+                "ok": True,
+                "exit_ip": "198.51.100.20",
+                "asn": 64500,
+                "asn_org": "Test",
+                "latency_ms": 50,
+                "checked_at": "2026-09-13T00:00:00Z",
+            },
+        )
+        proxy_store._apply_probe_result(
+            cooldown_id,
+            {
+                "ok": True,
+                "exit_ip": "198.51.100.21",
+                "asn": 64500,
+                "asn_org": "Test",
+                "latency_ms": 51,
+                "checked_at": "2026-09-13T00:00:00Z",
+            },
+        )
+        assert proxy_store.record_proxy_result(
+            "http://cooldown.example:8003", "network", "timeout"
+        )
+        with proxy_store._TEST_LOCK:
+            previous = dict(proxy_store._TEST_JOB)
+            proxy_store._TEST_JOB["testing_ids"] = [testing_id]
+        try:
+            result = proxy_store.delete_unhealthy_proxies()
+        finally:
+            with proxy_store._TEST_LOCK:
+                proxy_store._TEST_JOB.clear()
+                proxy_store._TEST_JOB.update(previous)
+
+        assert result["deleted_count"] == 1
+        assert result["skipped_testing_count"] == 1
+        remaining = {item["id"]: item for item in result["items"]}
+        assert unhealthy_id not in remaining
+        assert remaining[testing_id]["stored_status"] == "unhealthy"
+        assert remaining[healthy_id]["stored_status"] == "healthy"
+        assert remaining[cooldown_id]["stored_status"] == "cooldown"
+        unknown_id = next(
+            item["id"]
+            for item in imported["items"]
+            if item["host"] == "unknown.example"
+        )
+        assert remaining[unknown_id]["stored_status"] == "unknown"
+
+
 def test_async_probe_job_persists_health():
     with IsolatedStore():
         result = proxy_store.import_proxies("http://proxy.example:8080")

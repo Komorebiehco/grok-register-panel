@@ -33,7 +33,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | SSO 对照扫描 | grok.com `botFlagSource` / `policy=deny` **已不可靠**，不再作为风控门禁；旧面板仅保留对照 |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
 | **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、本批代理流量、账号补录、降智测试和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
-| 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
+| 外部代理池 | 面板粘贴或上传 `proxies.txt`、去重、探活、启停、删除检测失败项；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
 | 安全静态缓存 | 面板任务默认复用 JS / CSS / 字体 / 图片等 GET 静态资源；不缓存文档、接口、WebSocket 或 Turnstile |
@@ -319,11 +319,13 @@ python grok_register_ttk.py
 ### 外部代理池
 
 - 支持单条或批量粘贴 `http://user:pass@host:port`、`host:port:user:pass`，也兼容 HTTPS / SOCKS URL
+- 支持从浏览器上传 `proxies.txt`；上传和粘贴共用同一套格式校验、去重和自动检测流程
 - 导入时规范化并去重，随后后台并发探活；GET 接口轮询检测进度
 - API 和 UI 只返回脱敏端点及 `has_auth`，不会返回代理账号或密码
 - worker 只选择“健康 + 启用”的条目，并在每个新账号创建浏览器前热加载一次
 - 一个账号从注册、SSO 到 OAuth 始终固定同一代理，不会中途更换出口
 - 网络异常进入短冷却，注册风控进入长冷却；邮箱域名、验证码或邮箱 API 错误不处罚代理
+- “删除检测失败”只删除探活状态为 `unhealthy` 的条目，不会删除冷却、未检测或正在检测中的代理
 - 面板池已有条目但没有健康代理时任务会明确停止，不会绕过状态回退到旧文件
 - `proxies.txt` 可从界面导入；只有面板池完全未配置时，worker 才直接兼容旧文件 / `config.proxy`
 

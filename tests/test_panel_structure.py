@@ -122,6 +122,8 @@ def test_proxy_pool_panel_structure():
     assert 'id="proxy-view-toggle"' in html
     assert 'id="proxy-view"' in html
     assert 'id="proxy-input"' in html
+    assert 'id="proxy-file"' in html
+    assert 'id="proxy-file-button"' in html
     assert 'id="proxy-summary"' in html
     assert 'id="proxy-body"' in html
     assert 'function refreshProxies(' in mon
@@ -130,7 +132,10 @@ def test_proxy_pool_panel_structure():
     assert 'function testProxies(' in mon
     assert 'function setProxyEnabled(' in mon
     assert 'function deleteProxyItem(' in mon
+    assert 'function deleteUnhealthyProxies(' in mon
+    assert 'function importProxyFile(' in mon
     assert '/api/proxies/import' in mon
+    assert '/api/proxies/delete-unhealthy' in mon
     assert '/api/proxies/test' in mon
     assert 'def do_PATCH(self):' in mon
     assert 'def do_DELETE(self):' in mon

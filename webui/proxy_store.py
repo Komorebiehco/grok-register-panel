@@ -641,6 +641,38 @@ def delete_proxy(proxy_id: str) -> dict:
     return result
 
 
+def delete_unhealthy_proxies() -> dict:
+    """Delete probe failures, but leave proxies that are currently being tested."""
+    with _TEST_LOCK:
+        testing_ids = set(_TEST_JOB.get("testing_ids") or [])
+        with exclusive_file_lock(LOCK_PATH):
+            state, _ = _read_unlocked()
+            deleted_ids = []
+            skipped_testing_count = 0
+            kept_items = []
+            for item in state["items"]:
+                if item.get("status") != "unhealthy":
+                    kept_items.append(item)
+                    continue
+                if item["id"] in testing_ids:
+                    kept_items.append(item)
+                    skipped_testing_count += 1
+                    continue
+                deleted_ids.append(item["id"])
+            if deleted_ids:
+                state["items"] = kept_items
+                _write_unlocked(state)
+    result = read_proxy_pool()
+    result.update(
+        {
+            "deleted_count": len(deleted_ids),
+            "deleted_ids": deleted_ids,
+            "skipped_testing_count": skipped_testing_count,
+        }
+    )
+    return result
+
+
 def worker_proxy_snapshot() -> dict:
     """Return secret worker URLs plus whether a managed pool is configured."""
     with exclusive_file_lock(LOCK_PATH):

@@ -35,6 +35,7 @@ try:
     from webui.blacklist_store import read_blacklist as read_blacklist_state
     from webui.proxy_store import (
         delete_proxy,
+        delete_unhealthy_proxies,
         import_legacy_proxies,
         import_proxies,
         read_proxy_pool,
@@ -84,6 +85,7 @@ except ImportError:  # running as script from webui/
     from blacklist_store import read_blacklist as read_blacklist_state  # type: ignore
     from proxy_store import (  # type: ignore
         delete_proxy,
+        delete_unhealthy_proxies,
         import_legacy_proxies,
         import_proxies,
         read_proxy_pool,
@@ -196,6 +198,7 @@ ORCH_SCRIPT = ROOT / "run_until_100.py"
 CONTROL_LOCK = threading.RLock()
 START_LOCK = threading.Lock()
 MAX_REQUEST_BODY = 64 * 1024
+MAX_PROXY_IMPORT_BODY = 512 * 1024
 
 RE_OK = re.compile(r"\[\+\] 注册成功")
 RE_FAIL = re.compile(r"\[-\] 失败")
@@ -2231,6 +2234,8 @@ HTML = r"""<!DOCTYPE html>
           <p class="proxy-format">支持 http、https、socks5、socks5h，以及 host:port:user:password。导入后先检测，只有健康且启用的代理会分配给新账号。</p>
           <div class="button-group">
             <button class="primary" id="proxy-import-button" onclick="importProxyInput()">导入代理</button>
+            <button id="proxy-file-button" onclick="document.getElementById('proxy-file').click()">上传 proxies.txt</button>
+            <input id="proxy-file" type="file" accept=".txt,text/plain" hidden onchange="importProxyFile(this.files[0])">
             <button id="proxy-legacy-button" onclick="importLegacyProxies()">导入 proxies.txt</button>
           </div>
         </div>
@@ -2243,7 +2248,10 @@ HTML = r"""<!DOCTYPE html>
             <h2>代理明细</h2>
             <div class="proxy-job mono" id="proxy-test-status" role="status" aria-live="polite">未开始检测</div>
           </div>
-          <button id="proxy-test-all" onclick="testProxies()">检测全部</button>
+          <div class="button-group">
+            <button id="proxy-delete-unhealthy" class="danger" disabled onclick="deleteUnhealthyProxies()">删除检测失败</button>
+            <button id="proxy-test-all" onclick="testProxies()">检测全部</button>
+          </div>
         </div>
         <div class="proxy-table-wrap">
           <table class="proxy-table">
@@ -2998,6 +3006,8 @@ function renderProxyPool(data) {
   legacyButton.textContent = legacy.available ? ("导入 proxies.txt (" + (legacy.count || 0) + ")") : "无 proxies.txt";
 
   const job = proxyData.test_job || {};
+  const deleteUnhealthyButton = document.getElementById("proxy-delete-unhealthy");
+  deleteUnhealthyButton.disabled = !(summary.unhealthy > 0);
   const testButton = document.getElementById("proxy-test-all");
   testButton.disabled = !!job.running || !(summary.enabled > 0);
   document.getElementById("proxy-test-status").textContent = job.running
@@ -3065,6 +3075,31 @@ async function importProxyInput() {
   } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
   button.disabled = false;
 }
+async function importProxyFile(file) {
+  const input = document.getElementById("proxy-file");
+  const button = document.getElementById("proxy-file-button");
+  if (!file) return;
+  if (file.size > 512 * 1024) {
+    setMsg("proxy-msg", "proxies.txt 不能超过 512 KB", "err");
+    input.value = "";
+    return;
+  }
+  button.disabled = true;
+  setMsg("proxy-msg", "正在读取 " + file.name + "…", "");
+  try {
+    const value = (await file.text()).trim();
+    if (!value) throw new Error("文件为空");
+    const result = await api("/api/proxies/import", { method: "POST", body: JSON.stringify({ proxies: value }) });
+    renderProxyPool(result);
+    const testing = await startImportedProxyTests(result);
+    setMsg("proxy-msg", proxyImportMessage(result, "已从 " + file.name + " 导入 ") + (testing ? "，已开始检测" : ""), result.errors && result.errors.length ? "" : "ok");
+    setTimeout(() => refreshProxies(false), 300);
+  } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+  finally {
+    input.value = "";
+    button.disabled = false;
+  }
+}
 async function importLegacyProxies() {
   const button = document.getElementById("proxy-legacy-button");
   button.disabled = true;
@@ -3104,6 +3139,23 @@ async function deleteProxyItem(id) {
     renderProxyPool(result);
     setMsg("proxy-msg", "代理已删除", "ok");
   } catch (e) { setMsg("proxy-msg", String(e.message || e), "err"); }
+}
+async function deleteUnhealthyProxies() {
+  const count = Number(proxyData && proxyData.summary && proxyData.summary.unhealthy || 0);
+  if (!count) return;
+  if (!confirm("确认删除 " + count + " 条检测失败的代理？冷却、未检测和检测中的代理不会删除。")) return;
+  const button = document.getElementById("proxy-delete-unhealthy");
+  button.disabled = true;
+  try {
+    const result = await api("/api/proxies/delete-unhealthy", { method: "POST", body: "{}" });
+    renderProxyPool(result);
+    const skipped = Number(result.skipped_testing_count || 0);
+    const suffix = skipped ? "，跳过检测中的 " + skipped + " 条" : "";
+    setMsg("proxy-msg", "已删除检测失败代理 " + (result.deleted_count || 0) + " 条" + suffix, "ok");
+  } catch (e) {
+    button.disabled = false;
+    setMsg("proxy-msg", String(e.message || e), "err");
+  }
 }
 function currentEmailProviderDefinition(provider = selectedEmailProvider) {
   return (emailProviderData && emailProviderData.providers || []).find(item => item.id === provider) || null;
@@ -4302,7 +4354,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_write():
             return
         try:
-            body_limit = 4 * 1024 * 1024 if u.path == "/api/sso-state/start" else None
+            body_limit = (
+                4 * 1024 * 1024
+                if u.path == "/api/sso-state/start"
+                else (MAX_PROXY_IMPORT_BODY if u.path == "/api/proxies/import" else None)
+            )
             body = self._read_body(max_size=body_limit)
         except OverflowError as exc:
             self._json(413, {"ok": False, "error": str(exc)})
@@ -4430,6 +4486,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200 if result.get("ok") else 400, result)
             except Exception as e:
                 self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/proxies/delete-unhealthy":
+            try:
+                self._json(200, delete_unhealthy_proxies())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
         if u.path == "/api/proxies/test":
             try:
